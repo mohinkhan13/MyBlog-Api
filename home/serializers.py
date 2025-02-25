@@ -1,11 +1,13 @@
 from rest_framework import serializers
-from .models import CustomUser, PostCategory, Post
+from .models import CustomUser, PostCategory, Post, PostStats, Reply, Comment
 from django.utils.text import slugify
 
 class PostSerializer(serializers.ModelSerializer):
+    categoryName = serializers.CharField(source="category.name", read_only=True)
     class Meta:
         model = Post
         fields = '__all__'
+        ordering = ['-created_at']
     
     def create(self, validated_data):
         if 'slug' not in validated_data or not validated_data['slug']:
@@ -68,4 +70,34 @@ class UserSerializer(serializers.ModelSerializer):
         user.save()
         return user
     
+class CommentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Comment
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at']
+
+    def validate_email(self, value):
+        if "@" not in value or not value.endswith(('.com', '.in')):
+            raise serializers.ValidationError("Invalid email format.")
+        return value
     
+class ReplySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Reply
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at']
+
+    def validate_email(self, value):
+        if "@" not in value or not value.endswith(('.com', '.in')):
+            raise serializers.ValidationError("Invalid email format.")
+        return value
+
+
+# 🔹 PostStats Serializer
+class PostStatsSerializer(serializers.ModelSerializer):
+
+    post = PostSerializer(read_only=True)
+    class Meta:
+        model = PostStats
+        fields = '__all__'
+        read_only_fields = ['id']

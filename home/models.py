@@ -5,7 +5,7 @@ from django.utils.text import slugify
 class CustomUser(models.Model):
     fname = models.CharField(max_length=100)
     lname = models.CharField(max_length=100)
-    email = models.EmailField()
+    email = models.EmailField(unique=True)
     password = models.CharField(max_length=128)
     phone = models.CharField(max_length=100)
     address = models.CharField(max_length=100)
@@ -28,7 +28,7 @@ class Post(models.Model):
     STATUS_CHOICES = [
         ('draft', 'Draft'),
         ('publish', 'Publish'),
-        ('sheduled', 'Sheduled'),
+        ('scheduled', 'Scheduled'),
     ]
 
     title = models.CharField(max_length=255)
@@ -38,6 +38,7 @@ class Post(models.Model):
     tags = models.CharField(max_length=255, blank=True, help_text="Enter tags separated by commas")
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='draft')
     image = models.ImageField(upload_to='post_images/', null=True, blank=True, default=None)
+    author = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, default=None, related_name='posts')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -71,11 +72,11 @@ class Reply(models.Model):
         return f"Reply by {self.name} to {self.comment.name}"
 
 class PostStats(models.Model):
-    post = models.ForeignKey(Post, on_delete=models.CASCADE)
+    post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='stats')
     views = models.PositiveIntegerField(default=0)
     likes = models.PositiveIntegerField(default=0)
     comments = models.PositiveIntegerField(default=0)
     shares = models.PositiveIntegerField(default=0)
 
     def __str__(self):
-        return f"PostStats for {self.post.title}"
+        return f"Post Stats for -> {self.post.title}"
