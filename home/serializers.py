@@ -1,17 +1,32 @@
 from rest_framework import serializers
 from .models import CustomUser, PostCategory, Post, PostStats, Reply, Comment
 from django.utils.text import slugify
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
+class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    @classmethod
+    def get_token(cls, user):
+        token = super().get_token(user)
+        token['is_superuser'] = user.is_superuser
+        token['is_staff'] = user.is_staff  # Optional, for extra clarity
+        return token
+    
+class UserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CustomUser
+        fields = ['id', 'email', 'fname', 'lname', 'is_admin', 'joined_on']
+        
 class PostSerializer(serializers.ModelSerializer):
     categoryName = serializers.CharField(source="category.name", read_only=True)
+
     class Meta:
         model = Post
-        fields = '__all__'
-        ordering = ['-created_at']
+        fields = ['id', 'title', 'content', 'status', 'category', 'tags', 'image', 'author', 'slug', 'created_at', 'updated_at', 'categoryName']
+        read_only_fields = ['author', 'slug', 'created_at', 'updated_at', 'categoryName']  # Set by backend
     
     def create(self, validated_data):
         if 'slug' not in validated_data or not validated_data['slug']:
-            validated_data['slug'] = slugify(validated_data['title'])  # Generate slug
+            validated_data['slug'] = slugify(validated_data['title'])
         return super().create(validated_data)
 
 class CategorySerializer(serializers.ModelSerializer):
@@ -71,26 +86,26 @@ class UserSerializer(serializers.ModelSerializer):
         return user
     
 class CommentSerializer(serializers.ModelSerializer):
+    user = serializers.SlugRelatedField(
+        slug_field="email",
+        read_only=True,
+    )
+
     class Meta:
         model = Comment
-        fields = '__all__'
-        read_only_fields = ['id', 'created_at']
+        fields = "__all__"
+        read_only_fields = ["id", "created_at", "user"]
 
-    def validate_email(self, value):
-        if "@" not in value or not value.endswith(('.com', '.in')):
-            raise serializers.ValidationError("Invalid email format.")
-        return value
-    
 class ReplySerializer(serializers.ModelSerializer):
+    user = serializers.SlugRelatedField(
+        slug_field="email",
+        read_only=True,
+    )
+
     class Meta:
         model = Reply
-        fields = '__all__'
-        read_only_fields = ['id', 'created_at']
-
-    def validate_email(self, value):
-        if "@" not in value or not value.endswith(('.com', '.in')):
-            raise serializers.ValidationError("Invalid email format.")
-        return value
+        fields = "__all__"
+        read_only_fields = ["id", "created_at", "user"]
 
 
 # 🔹 PostStats Serializer
