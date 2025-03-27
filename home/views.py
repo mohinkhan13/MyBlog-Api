@@ -3,9 +3,9 @@ from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser
 from .serializers import (
     UserSerializer, CategorySerializer, PostSerializer,
-    CommentSerializer, ReplySerializer, PostStatsSerializer
+    CommentSerializer, ReplySerializer, PostStatsSerializer, ContactSerializer, NewsletterSerializer
 )
-from .models import CustomUser, PostCategory, Post, Comment, Reply, PostStats
+from .models import CustomUser, PostCategory, Post, Comment, Reply, PostStats, Contact, NewsLetter
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.db.models import F, ExpressionWrapper, FloatField
@@ -16,11 +16,15 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework import status
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.permissions import IsAdminUser
+from rest_framework import permissions
+import logging
+from django.db import transaction
 
+logger = logging.getLogger(__name__)
 
 def get_tokens_for_user(user):
     refresh = RefreshToken.for_user(user)
-    refresh['is_superuser'] = user.is_superuser  # Explicitly add to refresh token
+    refresh['is_superuser'] = user.is_superuser
     refresh['is_staff'] = user.is_staff
     return {
         'refresh': str(refresh),
@@ -34,19 +38,17 @@ class RegisterView(APIView):
         serializer = UserSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        if CustomUser.objects.filter(email=serializer.validated_data["email"]).exists():
-            return Response({"error": "Email already in use"}, status=status.HTTP_400_BAD_REQUEST)
-
         try:
             user = CustomUser.objects.create_user(**serializer.validated_data)
             tokens = get_tokens_for_user(user)
+            logger.info(f"User {user.email} registered successfully")
             return Response({
                 "message": "User registered successfully!",
                 "user": UserSerializer(user).data,
                 "tokens": tokens
             }, status=status.HTTP_201_CREATED)
         except Exception as e:
+            logger.error(f"Registration failed: {str(e)}")
             return Response({"error": f"Registration failed: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
 
 class LoginView(APIView):
@@ -70,15 +72,13 @@ class LoginView(APIView):
         tokens = get_tokens_for_user(user)
         user_data = UserSerializer(user).data
         user_data['is_admin'] = user.is_staff
-        user_data['is_superuser'] = user.is_superuser  # Add this
+        user_data['is_superuser'] = user.is_superuser
         response_data = {
             "user": user_data,
             "tokens": {"access": tokens["access"], "refresh": tokens["refresh"]},
-            "redirect": "/admin" if user.is_superuser else "/"  # Update to is_superuser
+            "redirect": "/admin" if user.is_superuser or user.is_staff else "/"
         }
-        from rest_framework_simplejwt.tokens import AccessToken
-        access_token = AccessToken(tokens["access"])
-        print("Generated Access Token Payload:", access_token.payload)
+        logger.info(f"User {user.email} logged in successfully")
         return Response(response_data, status=status.HTTP_200_OK)
 
 class LogoutView(APIView):
@@ -91,40 +91,32 @@ class LogoutView(APIView):
         try:
             token = RefreshToken(refresh_token)
             token.blacklist()
+            logger.info(f"User {request.user.email} logged out successfully")
             return Response({"message": "Logged out successfully"}, status=status.HTTP_200_OK)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Logout failed: {str(e)}")
             return Response({"error": "Invalid token"}, status=status.HTTP_400_BAD_REQUEST)
 
 class CurrentUserView(APIView):
     permission_classes = [IsAuthenticated]
     
     def get(self, request):
-        auth = JWTAuthentication()
-        header = request.headers.get('Authorization')        
-        if header:
-            try:
-                token = header.split()[1]
-                validated_token = auth.get_validated_token(token)                
-                user = auth.get_user(validated_token)                
-            except Exception as e:                
-                return Response({"detail": str(e)}, status=401)        
-        if not request.user.is_authenticated:
-            return Response({"detail": "User not authenticated"}, status=401)
         try:
             user = request.user
             return Response(UserSerializer(user).data)
-        except Exception as e:            
+        except Exception as e:
+            logger.error(f"Current user fetch failed: {str(e)}")
             return Response({"detail": str(e)}, status=500)
-        
+
 class CategoryViewset(ModelViewSet):
     queryset = PostCategory.objects.all()
     serializer_class = CategorySerializer
-    permission_classes = [AllowAny]  # Protected
+    permission_classes = [AllowAny]
 
 class UserViewset(ModelViewSet):
     queryset = CustomUser.objects.all()
     serializer_class = UserSerializer
-    permission_classes = [IsAuthenticated]  # Protected
+    permission_classes = [IsAuthenticated]
 
 class PostViewset(ModelViewSet):
     serializer_class = PostSerializer
@@ -137,20 +129,16 @@ class PostViewset(ModelViewSet):
     
     def get_queryset(self):
         user = self.request.user
-        print(f"User: {user}, Is Authenticated: {user.is_authenticated}, Is Superuser: {user.is_superuser}, Is Staff: {user.is_staff}")
+        print(f"User: {user}, Is Authenticated: {user.is_authenticated}, Is Superuser: {user.is_superuser}")
         if user.is_authenticated and user.is_superuser:
-            qs = Post.objects.all().order_by('-created_at')
-            print("Superuser Posts:", list(qs.values()))  # Debug all posts
-            return qs
-        qs = Post.objects.filter(status='publish').order_by('-created_at')
-        print("Non-Superuser Posts:", list(qs.values()))  # Debug publish posts
-        return qs
+            return Post.objects.all().order_by('-created_at')
+        return Post.objects.filter(status='publish').order_by('-created_at')
     
     def perform_create(self, serializer):
-        serializer.save(author=self.request.user)  
+        serializer.save(author=self.request.user)
     
     def perform_update(self, serializer):
-        serializer.save()  
+        serializer.save()
 
 class CommentViewset(ModelViewSet):
     queryset = Comment.objects.all()
@@ -162,7 +150,22 @@ class CommentViewset(ModelViewSet):
         return [AllowAny()] 
 
     def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+        with transaction.atomic():
+            comment = serializer.save(user=self.request.user)
+            # Increment PostStats comments count
+            post_stats, created = PostStats.objects.get_or_create(post=comment.post)
+            post_stats.comments = F('comments') + 1
+            post_stats.save(update_fields=['comments'])
+            logger.info(f"Comment created for post {comment.post.title}, stats updated")
+
+    def destroy(self, request, *args, **kwargs):
+        with transaction.atomic():
+            comment = self.get_object()
+            post_stats = PostStats.objects.get(post=comment.post)
+            post_stats.comments = F('comments') - 1
+            post_stats.save(update_fields=['comments'])
+            logger.info(f"Comment deleted for post {comment.post.title}, stats updated")
+            return super().destroy(request, *args, **kwargs)
 
 class ReplyViewset(ModelViewSet):
     serializer_class = ReplySerializer
@@ -170,7 +173,7 @@ class ReplyViewset(ModelViewSet):
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAuthenticated()]
-        return [AllowAny()]  # GET ko public karo
+        return [AllowAny()]
 
     def get_queryset(self):
         queryset = Reply.objects.all()
@@ -185,7 +188,7 @@ class ReplyViewset(ModelViewSet):
 class PostStatsViewset(ModelViewSet):
     queryset = PostStats.objects.all()
     serializer_class = PostStatsSerializer
-    permission_classes = [AllowAny]  # Protected
+    permission_classes = [AllowAny]
 
     def partial_update(self, request, *args, **kwargs):
         kwargs["partial"] = True
@@ -205,7 +208,6 @@ class PostStatsViewset(ModelViewSet):
             .order_by('-engagement_score')
             .first()
         )
-
         if not post_of_week:
             post_of_week = (
                 PostStats.objects.annotate(
@@ -217,8 +219,60 @@ class PostStatsViewset(ModelViewSet):
                 .order_by('-engagement_score')
                 .first()
             )
-
         if post_of_week:
             serializer = self.get_serializer(post_of_week)
             return Response(serializer.data)
         return Response({"message": "No post found for this week"}, status=status.HTTP_404_NOT_FOUND)
+   
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    def toggle_like(self, request, pk=None):
+        post_stat = self.get_object()
+        user = request.user
+        if user in post_stat.liked_by.all():
+            post_stat.liked_by.remove(user)
+            post_stat.likes = max(0, post_stat.likes - 1)
+        else:
+            post_stat.liked_by.add(user)
+            post_stat.likes += 1
+        post_stat.save()
+        serializer = self.get_serializer(post_stat)
+        return Response(serializer.data)
+    
+class ContactViewSet(ModelViewSet):
+    queryset = Contact.objects.all()
+    serializer_class = ContactSerializer
+
+    def get_permissions(self):
+        if self.action == 'create':
+            return [permissions.AllowAny()]
+        return [permissions.IsAdminUser()]
+
+    # def list(self, request, *args, **kwargs):
+    #     return Response({"message": "GET method not allowed"}, status=status.HTTP_403_FORBIDDEN)
+
+    # def retrieve(self, request, *args, **kwargs):
+    #     return Response({"message": "GET method not allowed"}, status=status.HTTP_403_FORBIDDEN)
+
+    def update(self, request, *args, **kwargs):
+        return Response({"message": "PATCH/PUT method not allowed"}, status=status.HTTP_403_FORBIDDEN)
+
+    def destroy(self, request, *args, **kwargs):
+        return Response({"message": "DELETE method not allowed"}, status=status.HTTP_403_FORBIDDEN)
+
+class NewsLetterViewSet(ModelViewSet):
+    queryset = NewsLetter.objects.all()
+    serializer_class = NewsletterSerializer
+
+    def get_permissions(self):
+        if self.action in ['create', 'partial_update']:
+            return [permissions.AllowAny()]
+        return [permissions.IsAdminUser()]
+
+    # def list(self, request, *args, **kwargs):
+    #     return Response({"message": "GET method not allowed"}, status=status.HTTP_403_FORBIDDEN)
+
+    def retrieve(self, request, *args, **kwargs):
+        return Response({"message": "GET method not allowed"}, status=status.HTTP_403_FORBIDDEN)
+
+    def destroy(self, request, *args, **kwargs):
+        return Response({"message": "DELETE method not allowed"}, status=status.HTTP_403_FORBIDDEN)
